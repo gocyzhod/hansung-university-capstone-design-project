@@ -1,0 +1,427 @@
+from djitellopy import Tello
+import os
+import argparse
+import json
+import cv2
+import time ##시간 확인
+from datetime import datetime  #오늘의 날짜시간확인
+from utils.utils import get_yolo_boxes, makedirs
+from utils.bbox import draw_boxes
+from keras.models import load_model
+from tqdm import tqdm
+import numpy as np
+
+def nothing(x):
+    pass
+
+def _main_(args):
+    ##5.11
+    config_path  = "config.json"
+    input_path   = "webcam"
+    ###
+    
+    with open(config_path) as config_buffer:    
+        config = json.load(config_buffer)
+
+    #makedirs(output_path)
+
+    ###############################
+    #   Set some parameter
+    ###############################       
+    net_h, net_w = 160, 160  # a multiple of 32, the smaller the faster
+    obj_thresh, nms_thresh = 0.9, 0.3
+
+    ###############################
+    #   Load the model
+    ###############################
+    os.environ['CUDA_VISIBLE_DEVICES'] = config['train']['gpus']
+    os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
+    infer_model = load_model(config['train']['saved_weights_name'])
+
+    ###############################
+    #   Predict bounding boxes 
+    ###############################
+    
+    if 'webcam' in input_path: # do detection on the first webcam
+        video_reader = cv2.VideoCapture(0)
+        #해상도 설정 06.05
+        print("Frame default resolution: (" + str(video_reader.get(cv2.CAP_PROP_FRAME_WIDTH)) + "; " + str(video_reader.get(cv2.CAP_PROP_FRAME_HEIGHT)) + ")")
+        video_reader.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        video_reader.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        print("Frame default resolution: (" + str(video_reader.get(cv2.CAP_PROP_FRAME_WIDTH)) + "; " + str(video_reader.get(cv2.CAP_PROP_FRAME_HEIGHT)) + ")")
+        
+        # the main loop
+        batch_size  = 1
+        images      = []
+        
+        ###Tello
+        tDistance = 0
+        dimensions = (1280, 720)
+        cWidth = int(dimensions[0]/2)
+        cHeight = int(dimensions[1]/2)
+        ###
+
+        cv2.namedWindow("DISTANCE")
+        cv2.resizeWindow("DISTANCE",640,480)
+        cv2.createTrackbar("distance","DISTANCE",0,10, nothing)
+        while True:
+            persons = []
+            ret_val, image = video_reader.read()
+            if ret_val == True: images += [image]
+
+
+            d = cv2.getTrackbarPos("distance","DISTANCE")
+            
+###############################여기 복사
+            if (len(images)==batch_size) or (ret_val==False and len(images)>0):##batch size만큼 image가 모이면 bbox 검출 시작
+                batch_boxes = get_yolo_boxes(infer_model, images, net_h, net_w, config['model']['anchors'], obj_thresh, nms_thresh)
+                ##bbox 검출
+
+                ###05.25 사람 검출
+                for i in range(len(images)):
+                    draw_boxes(images[i], batch_boxes[i], config['model']['labels'], obj_thresh)
+                    ##검출된 box에서 person 클레스 따로 저장
+                    for box in batch_boxes[i]:
+                        if(box.classes[14] > obj_thresh):
+                            persons.append(box)
+                        #(box.xmax-box.xmin) * (box.ymax-box.ymin)
+                        #print(box.classes[15])
+                        #print(box.xmax-box.xmin, box.ymax-box.ymin)
+                        #print("size = ", size)
+
+                    
+                ###05.25 사람 따라가기
+                if True:
+                    goto= 'go'
+                    #print(len(persons))
+                    if len(persons) > tDistance :
+                        box = persons[tDistance]
+                        boxX = (box.xmax + box.xmin)/2
+                        boxY = box.ymin + (box.ymax - box.ymin) * (0.4)
+                        boxSize = (box.xmax-box.xmin) * (box.ymax-box.ymin)
+                        boxSizeP = boxSize / 10000 
+                        
+                        ##오른쪽 왼쪽
+                        if cWidth - boxX < -50:
+                            goto += '_right'
+                            #yaw_velocity = S
+                            #me.left_right_velocity = S
+                        elif cWidth - boxX > 50:
+                            goto += '_left'
+                            #yaw_velocity = -S
+                            #me.left_right_velocity = -S
+                        else:
+                            a=1
+                            #up_down_velocity = 0
+                        
+                        ##위아래                            
+                        if cHeight -boxY < -50:
+                            goto += '_down'
+                            #me.up_down_velocity = S2
+                            
+                        elif cHeight -boxY > 50:
+                            goto += '_up'
+                            #me.up_down_velocity = -S2
+                            
+                        else:
+                            a=1
+                            #me.up_down_velocity = 0
+
+                        if boxSizeP < 25 * (d + 1):
+                            goto += '_foward'
+                            #me.for_back_velocity = S
+                            
+                        elif boxSizeP > 50 * (d + 1):
+                            goto += '_back'
+                            #me.for_back_velocity = -S
+                        else:
+                            a=1
+                            #me.for_back_velocity = 0
+                        print(boxX, boxY, boxSizeP)
+                        print(goto)
+                        cv2.line(images[i], (int(cWidth), int(cHeight)), (int(boxX), int(boxY)), (0, 0, 255), 2)
+                        #me.send_rc_control(left_right_velocity, for_back_velocity, up_down_velocity, yaw_velocity)
+                    else:
+                        #left_right_velocity = 0
+                        #yaw_velocity = 0
+                        #up_down_velocity = 0
+                        #for_back_velocity = 0
+                        print("can not detect person : ", tDistance)
+                        ##중앙 점 생성
+                cv2.circle(images[i], (cWidth, cHeight), 10, (0,0,255), 2)
+                    
+                cv2.imshow('video with bboxes', images[i])                    
+                    
+                ###
+                images = []
+
+        
+            if cv2.waitKey(1) == 27: 
+                break  # esc to quit
+        cv2.destroyAllWindows()
+        
+    elif 'tello' in input_path:
+        ##화면 크기
+        dimensions = (960, 720)
+        cWidth = int(dimensions[0]/2)
+        cHeight = int(dimensions[1]/2)
+
+        
+        
+        
+        ##batch size = 정보(이미지)를 한번에 얼마나 넘겨줄지
+        batch_size  = 1
+        images      = []
+        
+        me = Tello()
+        me.connect()
+        me.streamoff()
+        me.streamon()
+
+        ###Tello 설정값
+        ##시작시 모든 변수 초기화
+        S = 40
+        for_back_velocity = 0
+        left_right_velocity = 0
+        up_down_velocity = 0
+        yaw_velocity = 0
+        speed = 10
+        send_rc_control = False
+
+        
+        frameWidth = 320
+        frameHeight = 320
+
+        OVERRIDE = False
+        oSpeed = 2
+
+        ##123으로 사람 선택
+        tDistance = 0
+        
+        ##스트림05.11--> 수정 05.18
+        #video_reader = me.getVideoCaputer()
+        video_reader = me.get_frame_read()
+            ##get_dram_read는 tello의 제공 함수로
+            ##BacgroundFrameRead 클래스를 만들고 리턴해 준다.
+            ##이 클래스는 자동으로 cv2.videoCapture를 프레임에 맞게 만들어준다.
+        
+        ##동영상저장 추가05.11
+        fps = 8
+        fcc = cv2.VideoWriter_fourcc('D', 'I', 'V', 'X')
+        filename = "output/video_"+ datetime.today().strftime("%Y%m%d%H%M%S") + ".avi"
+        out = cv2.VideoWriter(filename, fcc, fps, (960,720))   
+        ###05.11
+
+        while True:
+            
+            ###05.25
+            ## person이라고 생각되는 박스를 저장하는 person
+            ## while문 시작시 초기화
+            persons = []
+            ###
+            
+            ##backgroundFrameRead에서 제공하는 public 변수
+            ## grabbed == 프레임이 들어왔는지 frame == 들어온 프레임
+            ret_val= video_reader.grabbed
+            image = video_reader.frame
+            
+            if ret_val == True:
+                images += [image]##frame을 하나하나 저장
+                ###동영상저장 추가05.11
+                out.write(image)
+                ###
+                #cv2.imshow('video with no box', image)
+            
+            if (len(images)==batch_size) or (ret_val==False and len(images)>0):##batch size만큼 image가 모이면 bbox 검출 시작
+                batch_boxes = get_yolo_boxes(infer_model, images, net_h, net_w, config['model']['anchors'], obj_thresh, nms_thresh)
+                ##bbox 검출
+
+                ###05.25 사람 검출
+                for i in range(len(images)):
+                    draw_boxes(images[i], batch_boxes[i], config['model']['labels'], obj_thresh)
+                    ##검출된 box에서 person 클레스 따로 저장
+                    for box in batch_boxes[i]:
+                        if(box.classes[14] > obj_thresh):
+                            persons.append(box)
+                        #(box.xmax-box.xmin) * (box.ymax-box.ymin)
+                        #print(box.classes[15])
+                        #print(box.xmax-box.xmin, box.ymax-box.ymin)
+                        #print("size = ", size)
+
+                    
+                ###05.25 사람 따라가기
+                if True:
+                    goto= 'go'
+                    #print(len(persons))
+                    if len(persons) > tDistance :
+                        box = persons[tDistance]
+                        boxX = (box.xmax + box.xmin)/2
+                        boxY = (box.ymax + box.ymin)/2
+                        boxSize = (box.xmax-box.xmin) * (box.ymax-box.ymin)
+
+                        if cWidth - boxX < -50:
+                            goto += '_right'
+                            yaw_velocity = S
+                            # me.left_right_velocity = S2
+                        elif cWidth - boxX > 50:
+                            goto += '_left'
+                            yaw_velocity = -S
+                            # me.left_right_velocity = -S2
+                        elif cHeight -boxY < -50:
+                            goto += '_up'
+                            
+                        elif cHeight -boxY > 50:
+                            goto += '_down'
+                        else:
+                            me.yaw_velocity = 0
+                            
+                        print(boxX, boxY, boxSize)
+                        print(goto)
+                        cv2.line(images[i], (int(cWidth), int(cHeight)), (int(boxX), int(boxY)), (0, 0, 255), 2)
+                        me.send_rc_control(left_right_velocity, for_back_velocity, up_down_velocity, yaw_velocity)
+                    else:
+                        left_right_velocity = 0
+                        yaw_velocity = 0
+                        up_down_velocity = 0
+                        for_back_velocity = 0
+                        print("can not detect person : ", tDistance)
+                        
+                ##중앙 점 생성
+                cv2.circle(images[i], (cWidth, cHeight), 10, (0,0,255), 2)
+
+                ## 중앙부터 박스까지 선
+                cv2.imshow('video with bboxes', images[i])                    
+                    
+                ###
+                images = []
+
+
+            ####키입력 추가 05.18
+            ###input key process
+            k = cv2.waitKey(20)
+            
+            if  k == 27 or video_reader.stopped:
+                video_reader.stop()
+                break
+
+            if k == ord('t'):# Press T to take off
+                print("Taking Off")
+                me.takeoff()
+                me.get_battery()
+                send_rc_control = True
+
+            if k == ord('l'):# Press L to land
+                print("Landing")
+                me.land()
+                send_rc_control = False
+
+
+            ##0,1,2,3으로 거리 조절
+            if k == ord('0'):
+                if not OVERRIDE:
+                    print("Distance = 0")
+                    tDistance = 0
+                
+            if k == ord('1'):
+                if OVERRIDE:
+                    oSpeed = 1
+                else:
+                    print("Distance = 1")
+                    tDistance = 1
+
+            # Press 2 to set distance to 2
+            if k == ord('2'):
+                if OVERRIDE:
+                    oSpeed = 2
+                else:
+                    print("Distance = 2")
+                    tDistance = 2
+                    
+            # Press 3 to set distance to 3
+            if k == ord('3'):
+                if OVERRIDE:
+                    oSpeed = 3
+       
+            # Press Backspace 직접 컨트롤 모드(Override)
+            if k == 8:
+                if not OVERRIDE:
+                    OVERRIDE = True
+                    print("OVERRIDE ENABLED")
+                else:
+                    OVERRIDE = False
+                    print("OVERRIDE DISABLED")
+
+            if OVERRIDE:
+                # S & W to fly forward & back
+                if k == ord('w'):
+                    me.for_back_velocity = int(S * oSpeed)
+                elif k == ord('s'):
+                    me.for_back_velocity = -int(S * oSpeed)
+                else:
+                    me.for_back_velocity = 0
+
+                # a & d to pan left & right
+                if k == ord('d'):
+                    me.yaw_velocity = int(S * oSpeed)
+                elif k == ord('a'):
+                    me.yaw_velocity = -int(S * oSpeed)
+                else:
+                    me.yaw_velocity = 0
+
+                # Q & E to fly up & down
+                if k == ord('e'):
+                    me.up_down_velocity = int(S * oSpeed)
+                elif k == ord('q'):
+                    me.up_down_velocity = -int(S * oSpeed)
+                else:
+                    me.up_down_velocity = 0
+
+                # c & z to fly left & right
+                if k == ord('c'):
+                    me.left_right_velocity = int(S * oSpeed)
+                elif k == ord('z'):
+                    me.left_right_velocity = -int(S * oSpeed)
+                else:
+                    me.left_right_velocity = 0
+
+
+                ####객체 따라가기 추가
+                    
+        ###동영상저장 추가05.11
+        out.release()
+        ###
+        cv2.destroyAllWindows()
+
+    else: # do detection on an image or a set of images
+        image_paths = []
+
+        if os.path.isdir(input_path): 
+            for inp_file in os.listdir(input_path):
+                image_paths += [input_path + inp_file]
+        else:
+            image_paths += [input_path]
+
+        image_paths = [inp_file for inp_file in image_paths if (inp_file[-4:] in ['.jpg', '.png', 'JPEG'])]
+
+        # the main loop
+        for image_path in image_paths:
+            image = cv2.imread(image_path)
+            print(image_path)
+
+            # predict the bounding boxes
+            boxes = get_yolo_boxes(infer_model, [image], net_h, net_w, config['model']['anchors'], obj_thresh, nms_thresh)[0]
+
+            # draw bounding boxes on the image using labels
+            draw_boxes(image, boxes, config['model']['labels'], obj_thresh) 
+     
+            # write the image with bounding boxes to file
+            cv2.imwrite(output_path + image_path.split('/')[-1], np.uint8(image))         
+
+if __name__ == '__main__':
+    argparser = argparse.ArgumentParser(description='Predict with a trained yolo model')
+    argparser.add_argument('-c', '--conf', help='path to configuration file')
+    argparser.add_argument('-i', '--input', help='path to an image, a directory of images, a video, or webcam')    
+    argparser.add_argument('-o', '--output', default='output/', help='path to output directory')   
+    
+    args = argparser.parse_args()
+    _main_(args)
